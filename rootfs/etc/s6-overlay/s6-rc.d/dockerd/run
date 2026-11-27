@@ -1,0 +1,37 @@
+#!/command/with-contenv bash
+
+. /usr/local/lib/harness/root-env.sh
+. /usr/local/lib/harness/dind.sh
+
+# Without DOCKER_DIND=true, or when dind_check fails, stay up doing nothing:
+# start.sh reports the reason. dockerd must never start against a host socket.
+if ! dind_enabled || ! dind_check 2>/dev/null; then
+  exec s6-pause
+fi
+dind_mark || exit 1
+
+# Left over from an earlier run of this container, they stop dockerd starting.
+find /run -xdev \( -name 'docker*.pid' -o -name 'container*.pid' \) -type f -delete
+
+# Use legacy iptables when the kernel does not offer nf_tables. The links live
+# in /usr/local/sbin, ahead of /usr/sbin on PATH, and leave the image's
+# alternatives as they are. (/var/lib/dpkg is still in the image: sh does not
+# expand the braces in the Dockerfile's rm -rf /var/lib/{...}.)
+if ! iptables -nL >/dev/null 2>&1 && iptables-legacy -nL >/dev/null 2>&1; then
+  ln -sf /usr/sbin/iptables-legacy /usr/local/sbin/iptables
+  ln -sf /usr/sbin/ip6tables-legacy /usr/local/sbin/ip6tables
+fi
+
+dind_nest_cgroups || exit 1
+
+# Overlay mounts cannot be stacked on overlayfs, so without a volume at
+# /var/lib/docker use the vfs driver, unless daemon.json chooses one.
+args=()
+mkdir -p /var/lib/docker
+if [ "$(stat -f -c %T /var/lib/docker)" = overlayfs ] &&
+  ! grep -qs '"storage-driver"' /etc/docker/daemon.json; then
+  args+=(--storage-driver=vfs)
+fi
+
+exec > >(exec s6-log -bp n3 'p[dockerd]' 1 /var/log/dockerd) 2>&1
+exec dockerd "${args[@]}"

@@ -1,0 +1,77 @@
+name: build-and-push
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/justmiles/agent-sandbox
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    # Room for a cold build and the full smoke test.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: agent-sandbox:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:latest
+          cache-to: type=inline
+
+      - name: Smoke test
+        run: SMOKE_PRIVILEGED=1 SMOKE_SOCKET=1 test/smoke.sh agent-sandbox:smoke
+
+      # Only this repository may publish the package.
+      - name: Log in to registry
+        if: github.event_name != 'pull_request' && github.repository == 'justmiles/agent-sandbox'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push the image that was tested. A second build could differ from it.
+      - name: Push the tested image
+        if: github.event_name != 'pull_request' && github.repository == 'justmiles/agent-sandbox'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            docker tag agent-sandbox:smoke "$tag"
+            docker push "$tag"
+          done <<<"$TAGS"

@@ -1,0 +1,28 @@
+#!/command/with-contenv sh
+
+. /usr/local/lib/harness/root-env.sh
+
+# tailscaled runs as root, so state the sandbox user can write is not safe.
+for path in "${TS_STATE_DIR:-}" "${TS_STATE:-}"; do
+  [ -n "$path" ] || continue
+  for p in "$path" "$(realpath -m -- "$path")"; do
+    case $p in
+      /home/sandbox | /home/sandbox/* | /nix | /nix/*)
+        echo "WARNING: Tailscale state path $path is writable by the sandbox user"
+        break
+        ;;
+    esac
+  done
+done
+
+# Set default userspace
+TS_USERSPACE="${TS_USERSPACE:-true}"
+
+# Start empty: an ARGS from the container's environment is not passed on.
+ARGS=
+
+[ ! -z "${TS_STATE_DIR}" ]      && ARGS="--statedir=${TS_STATE_DIR} ${ARGS}"
+[ ! -z "${TS_STATE}" ]          && ARGS="--state=${TS_STATE} ${ARGS}"
+[ "${TS_USERSPACE}" = "true" ]  && ARGS="--tun=userspace-networking ${ARGS}"
+
+tailscaled ${ARGS} 2>&1 | s6-log -bp n3 'p[tailscaled]' 1 /var/log/tailscaled
